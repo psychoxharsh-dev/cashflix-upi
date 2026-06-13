@@ -18,10 +18,10 @@ const POSTBACK_TOKEN = process.env.POSTBACK_TOKEN || 'cashflix_secure_2026';
 
 const offerConfig = {
   'Coinswitch': {
-    e1Amt: 0,       e1Balance: false, e1Comment: 'Coinswitch Install',
-    e2Amt: 25,      e2Balance: true,  e2Comment: 'Coinswitch Trial',
-    e3Amt: 0,       e3Balance: false, e3Comment: 'Coinswitch Step 3',
-    e4Amt: 0,       e4Balance: false, e4Comment: 'Coinswitch Step 4',
+    e1Amt: 0, e1Balance: false, e1Comment: 'Coinswitch Install',
+    e2Amt: 200, e2Balance: true, e2Comment: 'Coinswitch Trial',
+    e3Amt: 0, e3Balance: false, e3Comment: 'Coinswitch Step 3',
+    e4Amt: 0, e4Balance: false, e4Comment: 'Coinswitch Step 4',
     referAmt: 50
   }
 };
@@ -62,8 +62,9 @@ function sanitize(text) {
   return String(text).replace(/[<>]/g, '').trim().slice(0, 500);
 }
 
-function generateReferCode(upi) {
-  return upi.replace(/[^a-zA-Z0-9]/g, '').slice(0, 6).toUpperCase() + Math.floor(100 + Math.random() * 900);
+function generateReferCode() {
+  return (Math.random().toString(36).slice(2).toUpperCase() +
+          Math.random().toString(36).slice(2).toUpperCase()).slice(0, 14);
 }
 
 function getEventConfig(config, eventName) {
@@ -72,10 +73,10 @@ function getEventConfig(config, eventName) {
   const e3Events = ['e3', 'step3', 'kyc', 'verify'];
   const e4Events = ['e4', 'step4', 'deposit', 'buy', 'trade'];
 
-  if (e1Events.includes(eventName)) return { amt: config.e1Amt, balance: config.e1Balance, comment: config.e1Comment, type: 'install' };
-  if (e2Events.includes(eventName)) return { amt: config.e2Amt, balance: config.e2Balance, comment: config.e2Comment, type: 'trial' };
-  if (e3Events.includes(eventName)) return { amt: config.e3Amt, balance: config.e3Balance, comment: config.e3Comment, type: 'e3' };
-  if (e4Events.includes(eventName)) return { amt: config.e4Amt, balance: config.e4Balance, comment: config.e4Comment, type: 'e4' };
+  if (e1Events.includes(eventName)) return { amt: config.e1Amt, balance: config.e1Balance, comment: config.e1Comment, type: 'install', label: 'Install' };
+  if (e2Events.includes(eventName)) return { amt: config.e2Amt, balance: config.e2Balance, comment: config.e2Comment, type: 'trial', label: 'Trial' };
+  if (e3Events.includes(eventName)) return { amt: config.e3Amt, balance: config.e3Balance, comment: config.e3Comment, type: 'e3', label: 'KYC' };
+  if (e4Events.includes(eventName)) return { amt: config.e4Amt, balance: config.e4Balance, comment: config.e4Comment, type: 'e4', label: 'Deposit' };
   return null;
 }
 
@@ -118,37 +119,36 @@ async function dbPatch(table, filter, data) {
   });
 }
 
-// ✅ Register endpoint
-app.post('/register', async (req, res) => {
+// ✅ Click endpoint
+app.post('/click', async (req, res) => {
   try {
-    const { upi_id, offer_name, refer_code } = req.body;
-    if (!upi_id || !offer_name) return res.json({ success: false, error: 'Missing fields' });
-
-    const existing = await dbGet('upi_users', `upi_id=eq.${encodeURIComponent(upi_id)}`);
-    if (existing.length > 0) {
-      return res.json({ success: true, refer_code: existing[0].refer_code, already: true });
-    }
+    const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+    if (!rateLimit(ip, 30, 60000)) return res.status(429).json({ success: false });
+    const { click_id, offer_name, refer_code } = req.body;
+    if (!click_id || !offer_name) return res.json({ success: false });
+    console.log('CLICK RECEIVED:', { click_id, offer_name });
 
     let referred_by = null;
+    let user_payout = null;
+    let my_payout = null;
     if (refer_code) {
-      const referrer = await dbGet('upi_users', `refer_code=eq.${refer_code}`);
-      if (referrer.length > 0) referred_by = referrer[0].upi_id;
+      const referral = await dbGet('referrals', `code=eq.${refer_code}`);
+      if (referral.length > 0) {
+        referred_by = referral[0].referrer_upi;
+        user_payout = referral[0].user_payout;
+        my_payout = referral[0].my_payout;
+      }
     }
 
-    const newReferCode = generateReferCode(upi_id);
-    const masked = maskUPI(upi_id);
-
-    await dbPost('upi_users', {
-      upi_id,
-      masked_upi: masked,
-      refer_code: newReferCode,
+    await dbPost('clicks', {
+      click_id,
+      offer_name: sanitize(offer_name),
       referred_by,
-      total_earnings: 0
+      user_payout,
+      my_payout
     });
 
-    await dbPost('clicks', { click_id: upi_id, offer_name: sanitize(offer_name) });
-
-    res.json({ success: true, refer_code: newReferCode });
+    res.json({ success: true });
   } catch(e) {
     console.error(e);
     res.json({ success: false });
@@ -161,17 +161,15 @@ app.get('/tracker', async (req, res) => {
     const { upi } = req.query;
     if (!upi) return res.json({ success: false });
 
-    const users = await dbGet('upi_users', `upi_id=eq.${encodeURIComponent(upi)}`);
-    if (users.length === 0) return res.json({ success: false, error: 'Not found' });
-
-    const u = users[0];
     const conversions = await dbGet('upi_conversions', `upi_id=eq.${encodeURIComponent(upi)}&order=created_at.desc`);
+    if (conversions.length === 0) return res.json({ success: false, error: 'Not found' });
+
+    const totalEarnings = conversions.reduce((sum, c) => sum + (c.status === 'paid' ? parseFloat(c.amount) : 0), 0);
 
     res.json({
       success: true,
-      upi_id: u.masked_upi,
-      total_earnings: u.total_earnings,
-      refer_code: u.refer_code,
+      upi_id: maskUPI(upi),
+      total_earnings: totalEarnings,
       conversions: conversions.map(c => ({
         offer_name: c.offer_name,
         event: c.event,
@@ -183,6 +181,47 @@ app.get('/tracker', async (req, res) => {
   } catch(e) {
     console.error(e);
     res.json({ success: false });
+  }
+});
+
+// ✅ Refer create endpoint
+app.post('/refer/create', async (req, res) => {
+  try {
+    const { offer_id, offer_name, referrer_upi, user_payout, my_payout } = req.body;
+    if (!offer_id || !referrer_upi) return res.json({ success: false });
+
+    const code = generateReferCode();
+
+    await dbPost('referrals', {
+      code,
+      offer_id,
+      offer_name,
+      referrer_upi,
+      user_payout: user_payout || 0,
+      my_payout: my_payout || 0
+    });
+
+    const landing_url = `https://cashflix.site/Offer/${offer_id}`;
+    res.json({ success: true, code, landing_url });
+  } catch(e) {
+    console.error(e);
+    res.json({ success: false });
+  }
+});
+
+// ✅ Offer status endpoint
+app.get('/offer-status', async (req, res) => {
+  try {
+    const { offer } = req.query;
+    if (!offer) return res.json({ is_active: true });
+    const result = await dbGet('offer_status', `offer_name=eq.${encodeURIComponent(offer)}`);
+    if (result.length > 0) {
+      res.json({ is_active: result[0].is_active });
+    } else {
+      res.json({ is_active: true });
+    }
+  } catch(e) {
+    res.json({ is_active: true });
   }
 });
 
@@ -203,12 +242,18 @@ app.get('/postback', async (req, res) => {
 
     let offer = req.query.offer || 'Unknown';
     let runTime = getTime();
+    let referred_by = null;
+    let user_payout_custom = null;
+    let my_payout_custom = null;
 
     try {
       const clicks = await dbGet('clicks', `click_id=eq.${encodeURIComponent(click_id)}&order=created_at.desc&limit=1`);
       if (clicks.length > 0) {
         offer = clicks[0].offer_name;
         runTime = new Date(clicks[0].created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false }).replace(',', '');
+        referred_by = clicks[0].referred_by;
+        user_payout_custom = clicks[0].user_payout;
+        my_payout_custom = clicks[0].my_payout;
       }
     } catch(e) {}
 
@@ -229,78 +274,43 @@ app.get('/postback', async (req, res) => {
       return res.send('OK');
     }
 
-    console.log('EVENT TYPE:', eventConfig.type, 'AMOUNT:', eventConfig.amt);
-
-    // ✅ Install event — sirf track
+    // ✅ Install event — channel pe sirf event label
     if (eventConfig.type === 'install') {
       await dbPost('upi_conversions', { upi_id: click_id, offer_name: offer, event, amount: 0, status: 'tracked' });
 
-      const users = await dbGet('upi_users', `upi_id=eq.${encodeURIComponent(click_id)}`);
-      const userStatus = users.length > 0 ? 'Success' : 'Failed';
-
-      const msg = `<b>Conversation Count 💝</b>\n\n<b>🎁 Offer Name - ${offer}</b>\n\n<b>User Id : ${maskUPI(click_id)}</b>\n<b>🥳 Sms Sent : ${userStatus}</b>\n\n<b>Run Time - ${runTime}</b>\n<b>Track Time - ${trackTime}</b>\n\n<b>Powered By - CashFlix</b>`;
+      const msg = `<b>Conversation Count 💝</b>\n\n<b>🎁 Offer Name - ${offer}</b>\n\n<b>User Id : ${maskUPI(click_id)}</b>\n<b>🥳 Event : ${eventConfig.label} ✅</b>\n\n<b>Run Time - ${runTime}</b>\n<b>Track Time - ${trackTime}</b>\n\n<b>Powered By - CashFlix</b>`;
       await sendMsg(CHAT_ID, msg);
       return res.send('OK');
     }
 
     // ✅ Trial/e3/e4 — payout
-    const users = await dbGet('upi_users', `upi_id=eq.${encodeURIComponent(click_id)}`);
-    const userFound = users.length > 0;
-    const u = userFound ? users[0] : null;
-    const amt = eventConfig.amt || 0;
-    const referAmt = config.referAmt || 0;
+    let amt = user_payout_custom || eventConfig.amt || 0;
+    let referAmt = my_payout_custom || config.referAmt || 0;
 
-    let referFound = false;
     let referUpi = 'N/A';
     let referAmtPaid = 0;
 
-    if (userFound && amt > 0 && eventConfig.balance) {
-      const newEarnings = parseFloat(u.total_earnings) + amt;
-      await dbPatch('upi_users', `upi_id=eq.${encodeURIComponent(click_id)}`, { total_earnings: newEarnings });
+    if (amt > 0 && eventConfig.balance) {
       await dbPost('upi_conversions', { upi_id: click_id, offer_name: offer, event, amount: amt, status: 'paid' });
       await dbPost('upi_payouts', { upi_id: click_id, amount: amt, status: 'pending' });
 
-      // ✅ Refer bonus sirf trial pe
-      if (eventConfig.type === 'trial' && u.referred_by && referAmt > 0) {
-        referUpi = u.referred_by;
-        referFound = true;
+      if (referred_by && referAmt > 0) {
+        referUpi = referred_by;
         referAmtPaid = referAmt;
-        const referrer = await dbGet('upi_users', `upi_id=eq.${encodeURIComponent(u.referred_by)}`);
-        if (referrer.length > 0) {
-          const newRefEarnings = parseFloat(referrer[0].total_earnings) + referAmt;
-          await dbPatch('upi_users', `upi_id=eq.${encodeURIComponent(u.referred_by)}`, { total_earnings: newRefEarnings });
-          await dbPost('upi_payouts', { upi_id: u.referred_by, amount: referAmt, status: 'pending' });
-        }
+        await dbPost('upi_payouts', { upi_id: referred_by, amount: referAmt, status: 'pending' });
+        await dbPost('upi_conversions', { upi_id: referred_by, offer_name: offer, event: 'refer_bonus', amount: referAmt, status: 'paid' });
       }
-    } else if (userFound) {
+    } else {
       await dbPost('upi_conversions', { upi_id: click_id, offer_name: offer, event, amount: amt, status: 'tracked' });
     }
 
-    const userPayment = userFound ? 'Success' : 'Failed';
-
-    const msg = `<b>Conversation Count 💝</b>\n\n<b>🎁 Offer Name - ${offer}</b>\n\n<b>User Id : ${maskUPI(click_id)}</b>\n<b>User Amount : ₹${amt}</b>\n<b>🥳 User Payment : ${userPayment}</b>\n\n<b>Refer Id : ${maskUPI(referUpi)}</b>\n<b>Refer Amount : ₹${referAmtPaid}</b>\n<b>🥳 Refer Payment : Success</b>\n\n<b>Run Time - ${runTime}</b>\n<b>Track Time - ${trackTime}</b>\n\n<b>Powered By - CashFlix</b>`;
+    const msg = `<b>Conversation Count 💝</b>\n\n<b>🎁 Offer Name - ${offer}</b>\n\n<b>User Id : ${maskUPI(click_id)}</b>\n<b>User Amount : ₹${amt}</b>\n<b>🥳 Event : ${eventConfig.label} ✅</b>\n<b>🥳 User Payment : Success</b>\n\n<b>Refer Id : ${maskUPI(referUpi)}</b>\n<b>Refer Amount : ₹${referAmtPaid}</b>\n<b>🥳 Refer Payment : Success</b>\n\n<b>Run Time - ${runTime}</b>\n<b>Track Time - ${trackTime}</b>\n\n<b>Powered By - CashFlix</b>`;
     await sendMsg(CHAT_ID, msg);
 
   } catch(e) {
     console.error(e);
   }
   res.send('OK');
-});
-
-// ✅ Click endpoint
-app.post('/click', async (req, res) => {
-  try {
-    const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-    if (!rateLimit(ip, 30, 60000)) return res.status(429).json({ success: false });
-    const { click_id, offer_name } = req.body;
-    if (!click_id || !offer_name) return res.json({ success: false });
-    console.log('CLICK RECEIVED:', { click_id, offer_name });
-    await dbPost('clicks', { click_id, offer_name: sanitize(offer_name) });
-    res.json({ success: true });
-  } catch(e) {
-    console.error(e);
-    res.json({ success: false });
-  }
 });
 
 app.get('/', (req, res) => res.send('CashFlix UPI System Running! ✅'));
