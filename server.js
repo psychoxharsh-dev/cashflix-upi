@@ -26,6 +26,11 @@ const offerConfig = {
   }
 };
 
+// ✅ Offer ke landing page URLs yahan map karo
+const landingUrls = {
+  'Coinswitch': 'https://coinswitch-rho.vercel.app'
+};
+
 const rateLimitMap = {};
 function rateLimit(ip, limit = 50, windowMs = 60000) {
   const now = Date.now();
@@ -201,7 +206,7 @@ app.post('/refer/create', async (req, res) => {
       my_payout: my_payout || 0
     });
 
-    const landing_url = `https://cashflix.site/Offer/${offer_id}`;
+    const landing_url = landingUrls[offer_id] || `https://cashflix.site/Offer/${offer_id}`;
     res.json({ success: true, code, landing_url });
   } catch(e) {
     console.error(e);
@@ -274,7 +279,7 @@ app.get('/postback', async (req, res) => {
       return res.send('OK');
     }
 
-    // ✅ Install event — channel pe sirf event label
+    // ✅ Install event
     if (eventConfig.type === 'install') {
       await dbPost('upi_conversions', { upi_id: click_id, offer_name: offer, event, amount: 0, status: 'tracked' });
 
