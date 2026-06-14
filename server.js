@@ -28,7 +28,7 @@ const offerConfig = {
 
 // ✅ Offer ke landing page URLs yahan map karo
 const landingUrls = {
-  'Coinswitch': 'https://coinswitch-rho.vercel.app'
+  'Coinswitch': 'https://coinswitch.cashflix.site'
 };
 
 const rateLimitMap = {};
