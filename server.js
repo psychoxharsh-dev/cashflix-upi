@@ -26,9 +26,8 @@ const offerConfig = {
   }
 };
 
-// ✅ Offer ke landing page URLs yahan map karo
 const landingUrls = {
-  'Coinswitch': 'https://coinswitch.cashflix.site'
+  'Coinswitch': 'https://coinswitch-rho.vercel.app'
 };
 
 const rateLimitMap = {};
@@ -67,9 +66,14 @@ function sanitize(text) {
   return String(text).replace(/[<>]/g, '').trim().slice(0, 500);
 }
 
+// ✅ 8 character refer code
 function generateReferCode() {
-  return (Math.random().toString(36).slice(2).toUpperCase() +
-          Math.random().toString(36).slice(2).toUpperCase()).slice(0, 14);
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let code = '';
+  for (let i = 0; i < 8; i++) {
+    code += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return code;
 }
 
 function getEventConfig(config, eventName) {
@@ -214,6 +218,19 @@ app.post('/refer/create', async (req, res) => {
   }
 });
 
+// ✅ Refer amount check endpoint
+app.get('/refer/amount', async (req, res) => {
+  try {
+    const { code } = req.query;
+    if (!code) return res.json({ success: false });
+    const referral = await dbGet('referrals', `code=eq.${code}`);
+    if (referral.length === 0) return res.json({ success: false });
+    res.json({ success: true, user_payout: referral[0].user_payout, my_payout: referral[0].my_payout });
+  } catch(e) {
+    res.json({ success: false });
+  }
+});
+
 // ✅ Offer status endpoint
 app.get('/offer-status', async (req, res) => {
   try {
@@ -279,7 +296,6 @@ app.get('/postback', async (req, res) => {
       return res.send('OK');
     }
 
-    // ✅ Install event
     if (eventConfig.type === 'install') {
       await dbPost('upi_conversions', { upi_id: click_id, offer_name: offer, event, amount: 0, status: 'tracked' });
 
@@ -288,7 +304,6 @@ app.get('/postback', async (req, res) => {
       return res.send('OK');
     }
 
-    // ✅ Trial/e3/e4 — payout
     let amt = user_payout_custom || eventConfig.amt || 0;
     let referAmt = my_payout_custom || config.referAmt || 0;
 
