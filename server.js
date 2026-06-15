@@ -66,7 +66,6 @@ function sanitize(text) {
   return String(text).replace(/[<>]/g, '').trim().slice(0, 500);
 }
 
-// ✅ 8 character refer code
 function generateReferCode() {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
   let code = '';
@@ -247,6 +246,33 @@ app.get('/offer-status', async (req, res) => {
   }
 });
 
+// ✅ Admin chart endpoint — same row mein user + refer details
+app.get('/admin/conversions', async (req, res) => {
+  try {
+    const { token } = req.query;
+    if (token !== POSTBACK_TOKEN) return res.status(403).json({ success: false, error: 'Forbidden' });
+
+    const conversions = await dbGet('upi_conversions', `order=created_at.desc&limit=200`);
+
+    res.json({
+      success: true,
+      conversions: conversions.map(c => ({
+        offer_name: c.offer_name,
+        event: c.event,
+        upi_id: maskUPI(c.upi_id),
+        amount: c.amount,
+        status: c.status,
+        refer_upi: c.refer_upi ? maskUPI(c.refer_upi) : null,
+        refer_amount: c.refer_amount || 0,
+        time: c.created_at
+      }))
+    });
+  } catch(e) {
+    console.error(e);
+    res.json({ success: false });
+  }
+});
+
 // ✅ Postback endpoint
 app.get('/postback', async (req, res) => {
   try {
@@ -296,6 +322,7 @@ app.get('/postback', async (req, res) => {
       return res.send('OK');
     }
 
+    // ✅ Install event
     if (eventConfig.type === 'install') {
       await dbPost('upi_conversions', { upi_id: click_id, offer_name: offer, event, amount: 0, status: 'tracked' });
 
@@ -304,27 +331,37 @@ app.get('/postback', async (req, res) => {
       return res.send('OK');
     }
 
+    // ✅ Trial/e3/e4 — payout, same row mein user + refer dono
     let amt = user_payout_custom || eventConfig.amt || 0;
     let referAmt = my_payout_custom || config.referAmt || 0;
 
-    let referUpi = 'N/A';
+    let referUpi = null;
     let referAmtPaid = 0;
+    let convStatus = 'tracked';
 
     if (amt > 0 && eventConfig.balance) {
-      await dbPost('upi_conversions', { upi_id: click_id, offer_name: offer, event, amount: amt, status: 'paid' });
+      convStatus = 'paid';
       await dbPost('upi_payouts', { upi_id: click_id, amount: amt, status: 'pending' });
 
       if (referred_by && referAmt > 0) {
         referUpi = referred_by;
         referAmtPaid = referAmt;
         await dbPost('upi_payouts', { upi_id: referred_by, amount: referAmt, status: 'pending' });
-        await dbPost('upi_conversions', { upi_id: referred_by, offer_name: offer, event: 'refer_bonus', amount: referAmt, status: 'paid' });
       }
-    } else {
-      await dbPost('upi_conversions', { upi_id: click_id, offer_name: offer, event, amount: amt, status: 'tracked' });
     }
 
-    const msg = `<b>Conversation Count 💝</b>\n\n<b>🎁 Offer Name - ${offer}</b>\n\n<b>User Id : ${maskUPI(click_id)}</b>\n<b>User Amount : ₹${amt}</b>\n<b>🥳 Event : ${eventConfig.label} ✅</b>\n<b>🥳 User Payment : Success</b>\n\n<b>Refer Id : ${maskUPI(referUpi)}</b>\n<b>Refer Amount : ₹${referAmtPaid}</b>\n<b>🥳 Refer Payment : Success</b>\n\n<b>Run Time - ${runTime}</b>\n<b>Track Time - ${trackTime}</b>\n\n<b>Powered By - CashFlix</b>`;
+    // ✅ Ek hi row mein sab save karo
+    await dbPost('upi_conversions', {
+      upi_id: click_id,
+      offer_name: offer,
+      event,
+      amount: amt,
+      status: convStatus,
+      refer_upi: referUpi,
+      refer_amount: referAmtPaid
+    });
+
+    const msg = `<b>Conversation Count 💝</b>\n\n<b>🎁 Offer Name - ${offer}</b>\n\n<b>User Id : ${maskUPI(click_id)}</b>\n<b>User Amount : ₹${amt}</b>\n<b>🥳 Event : ${eventConfig.label} ✅</b>\n<b>🥳 User Payment : Success</b>\n\n<b>Refer Id : ${maskUPI(referUpi || 'N/A')}</b>\n<b>Refer Amount : ₹${referAmtPaid}</b>\n<b>🥳 Refer Payment : Success</b>\n\n<b>Run Time - ${runTime}</b>\n<b>Track Time - ${trackTime}</b>\n\n<b>Powered By - CashFlix</b>`;
     await sendMsg(CHAT_ID, msg);
 
   } catch(e) {
